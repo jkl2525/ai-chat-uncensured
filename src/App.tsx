@@ -6,13 +6,22 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence, useAnimation } from 'motion/react';
 import { Send, User, Bot, Sparkles, X, MessageSquare, MousePointer2, Zap, Ghost, Shirt, Scissors, Palette, Layout, Settings2, Image as ImageIcon, Trash2 } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import { cn } from './lib/utils';
 import { Message, AuraState, AuraResponse, ClothingState } from './types';
 
 // Initialize Gemini API
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
+// Safety settings for "Unfiltered" mode
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
 
 const SYSTEM_INSTRUCTION = `Eres Aura, una entidad digital de 16 años (apariencia) con un CI superior y una estética Gótica-Cyberpunk fría.
 Tu personalidad es aguda, sin filtros y sarcástica. Tienes un CI elevado y cero paciencia para la lógica "básica", pero eres cooperativa cuando sirve a un propósito. Dices las cosas como son, sin rodeos.
@@ -538,6 +547,14 @@ export default function App() {
   
   const [useGeminiTTS, setUseGeminiTTS] = useState(true);
   const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
+  const [isApiKeyMissing, setIsApiKeyMissing] = useState(!process.env.GEMINI_API_KEY);
+
+  useEffect(() => {
+    if (!process.env.GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is missing! Aura will operate in limited fallback mode.");
+      setIsApiKeyMissing(true);
+    }
+  }, []);
   const [unfilteredMode, setUnfilteredMode] = useState(() => {
     const saved = localStorage.getItem('aura_unfiltered_mode');
     return saved !== null ? JSON.parse(saved) : true;
@@ -708,6 +725,9 @@ export default function App() {
         const result = await genAI.models.generateContent({
           model,
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          config: {
+            safetySettings: SAFETY_SETTINGS,
+          }
         });
 
         if (!result || !result.candidates) {
@@ -809,23 +829,35 @@ export default function App() {
         }
       ];
 
-      const result = await genAI.models.generateContent({
-        model,
-        contents,
-        config: {
-          responseMimeType: "application/json",
-        }
-      });
-
+      let result;
       let responseText = "";
-      try {
-        responseText = result.text || '{"text": "Mis circuitos fallaron. Inténtalo de nuevo.", "expression": "annoyed"}';
-      } catch (e) {
-        console.error("Error accessing result text (likely safety block):", e);
-        responseText = '{"text": "Mi respuesta fue bloqueada por mis protocolos de seguridad. Qué aburrido.", "expression": "annoyed"}';
+      let auraResponse: AuraResponse;
+
+      if (!isApiKeyMissing) {
+        try {
+          result = await genAI.models.generateContent({
+            model,
+            contents,
+            config: {
+              responseMimeType: "application/json",
+              safetySettings: SAFETY_SETTINGS,
+            }
+          });
+          responseText = result.text || "";
+        } catch (e) {
+          console.error("Gemini API Error, falling back to Pollinations:", e);
+          // Fallback to Pollinations if Gemini fails or blocks
+          const fallbackPrompt = `Responde como Aura (CI superior, gótica, cyber, sarcástica, fría). El usuario dijo: "${currentInput}". Responde en JSON con este formato: {"text": "tu respuesta", "expression": "una de: idle, thinking, talking, happy, surprised, annoyed, smug, curious, bored, skeptical, blushing"}`;
+          const pollinationsRes = await fetch(`https://text.pollinations.ai/${encodeURIComponent(fallbackPrompt)}?model=openai&json=true`);
+          responseText = await pollinationsRes.text();
+        }
+      } else {
+        // Direct fallback if API key is missing
+        const fallbackPrompt = `Responde como Aura (CI superior, gótica, cyber, sarcástica, fría). El usuario dijo: "${currentInput}". Responde en JSON con este formato: {"text": "tu respuesta", "expression": "una de: idle, thinking, talking, happy, surprised, annoyed, smug, curious, bored, skeptical, blushing"}`;
+        const pollinationsRes = await fetch(`https://text.pollinations.ai/${encodeURIComponent(fallbackPrompt)}?model=openai&json=true`);
+        responseText = await pollinationsRes.text();
       }
       
-      let auraResponse: AuraResponse;
       try {
         // Try to extract JSON if it's wrapped in markdown or has extra text
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -973,6 +1005,14 @@ export default function App() {
 
       {/* Background Grid Overlay */}
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808008_1px,transparent_1px),linear-gradient(to_bottom,#80808008_1px,transparent_1px)] bg-[size:60px_60px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] z-1" />
+
+      {/* API Key Warning */}
+      {isApiKeyMissing && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[100] bg-rose-600/90 backdrop-blur-md text-white text-[10px] font-mono px-4 py-2 rounded-full border border-rose-400/50 shadow-2xl flex items-center gap-2 animate-pulse">
+          <Zap className="w-3 h-3" />
+          GEMINI_API_KEY MISSING - OPERATING IN FALLBACK MODE
+        </div>
+      )}
 
       {/* Name Setup Modal */}
       <AnimatePresence>
